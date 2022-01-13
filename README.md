@@ -1,6 +1,6 @@
 # Deep Kalman Filter
 
-Repository for Deep Kalman filter series implemented with PyTorch.
+PyTorch implementations of deep kalman filters.
 
 ## References
 
