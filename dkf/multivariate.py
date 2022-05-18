@@ -1,5 +1,6 @@
 """ Deep Kalman Filter for Multivariate Timeseries """
 
+import copy
 import torch
 import torch.nn as nn
 from torch.distributions import MultivariateNormal
@@ -126,12 +127,15 @@ class DKF(nn.Module):
             / torch.exp(logvar2) - torch.ones(1, device=mu1.device)
         ), 1)
 
-    def infer(self, x):
-        
+    def infer(self, x, y):
+
+        assert x.size() == y.size()
+
         batch_size, T_max, x_dim = x.size()
         h_0 = self.h_0.expand(1, batch_size, self.rnn_dim).contiguous()
         rnn_out, h_n = self.rnn(x, h_0)
 
+        # encode x which can contain missing values
         z_prev = self.z_q_0.expand(batch_size, self.z_q_0.size(0))
         kl_states = torch.zeros((batch_size, T_max))
         rec_losses = torch.zeros((batch_size, T_max))
@@ -147,10 +151,12 @@ class DKF(nn.Module):
             # compute loss
             kl_states[:, t] = self.kl_div(
                 z_mu, z_logvar, z_prior_mu, z_prior_logvar)
+
+            # error between x and y
             rec_losses[:, t] = nn.MSELoss(reduction='none')(
                 x_t.contiguous().view(-1),
                 # x_mu.contiguous().view(-1),
-                x[:, t].contiguous().view(-1)
+                y[:, t].contiguous().view(-1)
             ).view(batch_size, -1).mean(dim=1)
 
             z_prev = z_t
@@ -199,7 +205,7 @@ class DKF(nn.Module):
 
         return x_hat, x_025, x_975
 
-    def predict(self, x, pred_steps=1, num_sample=100):
+    def predict(self, x, pred_steps=1, num_sample=100, step_by_step=True):
         """ x should contain the prediction period
         """
         # Outputs
@@ -210,6 +216,11 @@ class DKF(nn.Module):
         batch_size, T_max, x_dim = x.size()
         assert batch_size == 1
         z_prev = self.z_0.expand(num_sample, self.z_0.size(0))
+
+        if not step_by_step:
+            # hide test inputs
+            x = copy.deepcopy(x)
+            x[:, -pred_steps:] = 0.
 
         h_0 = self.h_0.expand(1, 1, self.rnn_dim).contiguous()
         rnn_out, _ = self.rnn(x[:, :T_max-pred_steps], h_0)
@@ -232,13 +243,14 @@ class DKF(nn.Module):
             z_prev = z_mu
 
         for t in range(T_max - pred_steps, T_max):
+
             rnn_out, _ = self.rnn(x[:, :t], h_0)
-            rnn_out = rnn_out.expand(
-                num_sample, rnn_out.size(1), rnn_out.size(2))
+            rnn_out = rnn_out.expand(num_sample, rnn_out.size(1), rnn_out.size(2))
 
             z_t_1, z_mu, z_logvar = self.combiner(z_prev, rnn_out[:, -1])
             z_t, z_mu, z_logvar = self.trans(z_t_1)
             x_t, x_mu, x_logvar = self.emitter(z_t)
+            x[:, t] = torch.unsqueeze(x_mu.mean(axis=0), 0)
 
             x_covar = torch.diag(torch.sqrt(torch.exp(.5 * x_logvar)))
             x_samples = MultivariateNormal(
@@ -250,10 +262,10 @@ class DKF(nn.Module):
 
         return x_hat, x_025, x_975
 
-    def train_step(self, x, annealing_factor=0.1):
+    def train_step(self, x, y, annealing_factor=0.1):
         self.train()
         # self.rnn.train()
-        rec_loss, kl_loss = self.infer(x)
+        rec_loss, kl_loss = self.infer(x, y)
         total_loss = rec_loss + annealing_factor * kl_loss
         self.optimizer.zero_grad()
         total_loss.backward()
@@ -263,16 +275,19 @@ class DKF(nn.Module):
 
     def validation_step(self, x, annealing_factor=0.1):
         self.eval()
-        rec_loss, kl_loss = self.infer(x)
+        rec_loss, kl_loss = self.infer(x, x)
         total_loss = rec_loss + annealing_factor * kl_loss
         return rec_loss.item(), kl_loss.item(), total_loss.item()
 
-    def fit(self, x, x_val=None, num_epochs=100, annealing_factor=0.1,
+    def fit(self, x, x_val=None, y=None, num_epochs=100, annealing_factor=0.1,
             verbose_step=1, eval_step=1, check_point_path=None,
             patience=20, learning_rate=0.01):
 
         self.optimizer = torch.optim.Adam(
             self.parameters(), lr=learning_rate)
+
+        if y is None:
+            y = copy.deepcopy(x)
 
         losses = []
         kl_losses = []
@@ -283,7 +298,7 @@ class DKF(nn.Module):
 
         for epoch in range(num_epochs):
             try:
-                res = self.train_step(x, annealing_factor=annealing_factor)
+                res = self.train_step(x, y, annealing_factor=annealing_factor)
                 losses.append(res[2])
                 kl_losses.append(res[1])
                 rec_losses.append(res[0])
