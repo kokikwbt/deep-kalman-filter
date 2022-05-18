@@ -213,7 +213,7 @@ class DKF(nn.Module):
         x_025 = torch.zeros(x.size())
         x_975 = torch.zeros(x.size())
 
-        batch_size, T_max, x_dim = x.size()
+        batch_size, T_max, _ = x.size()
         assert batch_size == 1
         z_prev = self.z_0.expand(num_sample, self.z_0.size(0))
 
@@ -229,8 +229,8 @@ class DKF(nn.Module):
 
         for t in range(T_max - pred_steps):
             # z_t: (num_sample, z_dim)
-            z_t, z_mu, z_logvar = self.combiner(z_prev, rnn_out[:, t])
-            x_t, x_mu, x_logvar = self.emitter(z_t)
+            z_t, z_mu, _ = self.combiner(z_prev, rnn_out[:, t])
+            _, x_mu, x_logvar = self.emitter(z_t)
 
             x_covar = torch.diag(torch.sqrt(torch.exp(.5 * x_logvar)))
             x_samples = MultivariateNormal(
@@ -247,10 +247,13 @@ class DKF(nn.Module):
             rnn_out, _ = self.rnn(x[:, :t], h_0)
             rnn_out = rnn_out.expand(num_sample, rnn_out.size(1), rnn_out.size(2))
 
-            z_t_1, z_mu, z_logvar = self.combiner(z_prev, rnn_out[:, -1])
-            z_t, z_mu, z_logvar = self.trans(z_t_1)
-            x_t, x_mu, x_logvar = self.emitter(z_t)
-            x[:, t] = torch.unsqueeze(x_mu.mean(axis=0), 0)
+            z_t_1, z_mu, _ = self.combiner(z_prev, rnn_out[:, -1])
+            z_t, z_mu, _ = self.trans(z_t_1)
+            _, x_mu, x_logvar = self.emitter(z_t)
+
+            if not step_by_step:
+                # overwrite the next point x with the mean emission value
+                x[:, t] = torch.unsqueeze(x_mu.mean(axis=0), 0)
 
             x_covar = torch.diag(torch.sqrt(torch.exp(.5 * x_logvar)))
             x_samples = MultivariateNormal(
